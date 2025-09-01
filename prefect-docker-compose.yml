@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefect_secure_password_2024}
+      POSTGRES_DB: prefect
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Database Configuration
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:${POSTGRES_PASSWORD:-prefect_secure_password_2024}@postgres:5432/prefect
+      
+      # Server Configuration
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_SERVER_API_PORT: 4200
+      # Coolify will handle the external URL automatically
+      PREFECT_API_URL: http://prefect-server:4200/api
+      
+      # Redis Configuration for messaging and caching
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: redis
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+      
+      # Additional Configuration
+      PREFECT_LOGGING_LEVEL: INFO
+      PREFECT_SERVER_ANALYTICS_ENABLED: false
+    command: prefect server start --no-services
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:4200/api/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    # Note: Coolify will handle port exposure and routing
+    expose:
+      - "4200"
+
+  prefect-services:
+    image: prefecthq/prefect:3-latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      prefect-server:
+        condition: service_healthy
+    environment:
+      # Database Configuration
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:${POSTGRES_PASSWORD:-prefect_secure_password_2024}@postgres:5432/prefect
+      
+      # Server Configuration
+      PREFECT_API_URL: http://prefect-server:4200/api
+      
+      # Redis Configuration
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: redis
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+      
+      # Additional Configuration
+      PREFECT_LOGGING_LEVEL: INFO
+    command: prefect server services start
+    restart: unless-stopped
+
+  prefect-worker:
+    image: prefecthq/prefect:3-latest
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      # Server Configuration
+      PREFECT_API_URL: http://prefect-server:4200/api
+      
+      # Worker Configuration
+      PREFECT_LOGGING_LEVEL: INFO
+    command: prefect worker start --pool default-agent-pool --type process
+    restart: unless-stopped
+    volumes:
+      # Mount docker socket for Docker-based flows (optional)
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Add this if your flows need access to the host filesystem
+    # - /tmp:/tmp
+
+volumes:
+  postgres_data:
+  redis_data:
